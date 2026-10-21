@@ -18,6 +18,8 @@ object ClaudeClient {
         .build()
 
     fun translate(apiKey: String, model: String, language: String, shot: Bitmap): String {
+        val useModel = if (model.isBlank() || model.startsWith("claude")) "gemini-3.5-flash" else model
+
         val maxEdge = 1568
         val scale = minOf(1f, maxEdge.toFloat() / maxOf(shot.width, shot.height))
         val bmp = if (scale < 1f)
@@ -32,30 +34,29 @@ object ClaudeClient {
             "Ignore status bar items like time, battery and signal. " +
             "Output only the translation, no commentary."
 
-        val content = JSONArray()
-            .put(JSONObject().put("type", "image").put("source", JSONObject()
-                .put("type", "base64").put("media_type", "image/jpeg").put("data", b64)))
-            .put(JSONObject().put("type", "text").put("text", prompt))
-        val body = JSONObject()
-            .put("model", model)
-            .put("max_tokens", 2000)
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+        val reqParts = JSONArray()
+            .put(JSONObject().put("inline_data", JSONObject()
+                .put("mime_type", "image/jpeg").put("data", b64)))
+            .put(JSONObject().put("text", prompt))
+        val body = JSONObject().put("contents",
+            JSONArray().put(JSONObject().put("parts", reqParts)))
 
         val req = Request.Builder()
-            .url("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", apiKey)
-            .header("anthropic-version", "2023-06-01")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$useModel:generateContent")
+            .header("x-goog-api-key", apiKey)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         http.newCall(req).execute().use { resp ->
             val txt = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) return "API error ${resp.code}: $txt"
-            val arr = JSONObject(txt).getJSONArray("content")
+            val cands = JSONObject(txt).optJSONArray("candidates")
+                ?: return "No result: $txt"
+            val outParts = cands.getJSONObject(0).optJSONObject("content")
+                ?.optJSONArray("parts") ?: return "No text returned: $txt"
             val sb = StringBuilder()
-            for (i in 0 until arr.length()) {
-                val b = arr.getJSONObject(i)
-                if (b.optString("type") == "text") sb.append(b.getString("text"))
+            for (i in 0 until outParts.length()) {
+                sb.append(outParts.getJSONObject(i).optString("text"))
             }
             return sb.toString().trim()
         }
