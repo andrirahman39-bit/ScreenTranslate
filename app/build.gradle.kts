@@ -8,8 +8,8 @@ android {
     defaultConfig {
         applicationId = "com.example.screentranslate"
         minSdk = 30
-        targetSdk = 34
-        versionCode = 1
+        targetSdk = 45
+        versionCode = 3
         versionName = "1.0"
     }
     buildTypes { release { isMinifyEnabled = false } }
