@@ -18,6 +18,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -37,6 +38,7 @@ class TranslateService : Service() {
     private var reader: ImageReader? = null
     private var vDisplay: VirtualDisplay? = null
     private var bubble: TextView? = null
+    private var bubbleBg: GradientDrawable? = null
     private var panel: View? = null
     private val main = Handler(Looper.getMainLooper())
     private var w = 0
@@ -44,6 +46,20 @@ class TranslateService : Service() {
     private var last: Bitmap? = null
     private var busy = false
     private val overlayType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+
+    // auto mode state
+    private var auto = false
+    private var lastSig: IntArray? = null
+    private var prevSig: IntArray? = null
+    private var lastCallAt = 0L
+    private val poller = object : Runnable {
+        override fun run() {
+            if (auto) {
+                if (!busy) pollOnce()
+                main.postDelayed(this, 1200)
+            }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -71,7 +87,7 @@ class TranslateService : Service() {
         nm.createNotificationChannel(NotificationChannel("st", "Screen Translate", NotificationManager.IMPORTANCE_LOW))
         val n = Notification.Builder(this, "st")
             .setContentTitle("Screen Translate is running")
-            .setContentText("Tap the floating bubble to translate")
+            .setContentText("Tap bubble: translate. Hold bubble: auto mode")
             .setSmallIcon(android.R.drawable.ic_menu_search)
             .build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
@@ -96,36 +112,93 @@ class TranslateService : Service() {
                 val rowPad = pl.rowStride - pl.pixelStride * w
                 val full = Bitmap.createBitmap(w + rowPad / pl.pixelStride, h, Bitmap.Config.ARGB_8888)
                 full.copyPixelsFromBuffer(pl.buffer)
-                last = Bitmap.createBitmap(full, 0, 0, w, h)
+                last = if (rowPad == 0) full else Bitmap.createBitmap(full, 0, 0, w, h)
             }
         }
         return last
     }
 
+    // Brightness grid of the top half of the screen (the result panel covers the bottom).
+    private fun signature(b: Bitmap): IntArray {
+        val n = 40
+        val s = IntArray(n * n)
+        val maxY = (b.height * 0.5f).toInt()
+        for (r in 0 until n) for (c in 0 until n) {
+            val x = ((c + 0.5f) * b.width / n).toInt().coerceIn(0, b.width - 1)
+            val y = ((r + 0.5f) * maxY / n).toInt().coerceIn(0, b.height - 1)
+            val p = b.getPixel(x, y)
+            s[r * n + c] = (Color.red(p) * 3 + Color.green(p) * 6 + Color.blue(p)) / 10
+        }
+        return s
+    }
+
+    private fun diff(a: IntArray, b: IntArray): Float {
+        var n = 0
+        for (i in a.indices) if (abs(a[i] - b[i]) > 24) n++
+        return n.toFloat() / a.size
+    }
+
+    private fun pollOnce() {
+        val bmp = grab() ?: return
+        val sig = signature(bmp)
+        val ref = lastSig
+        val changed = ref == null || diff(sig, ref) > 0.05f
+        val prev = prevSig
+        val stable = prev != null && diff(sig, prev) < 0.03f
+        prevSig = sig
+        if (changed && stable && SystemClock.uptimeMillis() - lastCallAt >= 5000) translate()
+    }
+
+    private fun toggleAuto() {
+        auto = !auto
+        updateBubble()
+        if (auto) {
+            lastSig = null; prevSig = null
+            main.removeCallbacks(poller)
+            main.post(poller)
+            Toast.makeText(this, "Auto translate ON", Toast.LENGTH_SHORT).show()
+        } else {
+            main.removeCallbacks(poller)
+            Toast.makeText(this, "Auto translate OFF", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun updateBubble() {
+        bubble?.text = if (auto) "A" else "译"
+        bubbleBg?.setColor(if (auto) 0xFF2E7D32.toInt() else 0xFFD97757.toInt())
+    }
+
     private fun showBubble() {
         val dp = resources.displayMetrics.density
         val size = (56 * dp).toInt()
+        val bg = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFD97757.toInt()) }
         val v = TextView(this).apply {
             text = "译"; gravity = Gravity.CENTER; setTextColor(Color.WHITE); textSize = 22f
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFD97757.toInt()) }
+            background = bg
         }
+        bubbleBg = bg
         val lp = WindowManager.LayoutParams(
             size, size, overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = h / 3 }
         v.setOnTouchListener(object : View.OnTouchListener {
-            var sx = 0f; var sy = 0f; var ox = 0; var oy = 0; var moved = false
+            var sx = 0f; var sy = 0f; var ox = 0; var oy = 0; var moved = false; var downAt = 0L
             override fun onTouch(view: View, e: MotionEvent): Boolean {
                 when (e.action) {
-                    MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; ox = lp.x; oy = lp.y; moved = false }
+                    MotionEvent.ACTION_DOWN -> {
+                        sx = e.rawX; sy = e.rawY; ox = lp.x; oy = lp.y; moved = false
+                        downAt = SystemClock.uptimeMillis()
+                    }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = (e.rawX - sx).toInt(); val dy = (e.rawY - sy).toInt()
                         if (abs(dx) > 10 || abs(dy) > 10) moved = true
                         lp.x = ox + dx; lp.y = oy + dy
                         wm.updateViewLayout(view, lp)
                     }
-                    MotionEvent.ACTION_UP -> if (!moved) translate()
+                    MotionEvent.ACTION_UP -> if (!moved) {
+                        if (SystemClock.uptimeMillis() - downAt > 600) toggleAuto() else translate()
+                    }
                 }
                 return true
             }
@@ -147,20 +220,23 @@ class TranslateService : Service() {
                 Toast.makeText(this, "No frame captured yet, try again", Toast.LENGTH_SHORT).show()
                 return@postDelayed
             }
+            lastSig = signature(bmp)
+            prevSig = lastSig
+            lastCallAt = SystemClock.uptimeMillis()
             bubble?.text = "…"
             val p = getSharedPreferences("cfg", MODE_PRIVATE)
             Thread {
                 val result = try {
                     ClaudeClient.translate(
                         p.getString("key", "") ?: "",
-                        p.getString("model", "claude-haiku-5-5") ?: "claude-haiku-5-5",
+                        p.getString("model", "") ?: "",
                         p.getString("lang", "English") ?: "English",
                         bmp
                     )
                 } catch (e: Exception) { "Error: ${e.message}" }
-                main.post { bubble?.text = "译"; showPanel(result); busy = false }
+                main.post { updateBubble(); showPanel(result); busy = false; lastCallAt = SystemClock.uptimeMillis() }
             }.start()
-        }, 200)
+        }, 250)
     }
 
     private fun showPanel(text: String) {
@@ -171,7 +247,13 @@ class TranslateService : Service() {
             setPadding((16 * dp).toInt(), (12 * dp).toInt(), (16 * dp).toInt(), (12 * dp).toInt())
             setTextIsSelectable(true)
         }
-        val close = Button(this).apply { this.text = "Close"; setOnClickListener { hidePanel() } }
+        val close = Button(this).apply {
+            this.text = "Close (turns auto off)"
+            setOnClickListener {
+                if (auto) toggleAuto()
+                hidePanel()
+            }
+        }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xF0111827.toInt())
@@ -192,6 +274,8 @@ class TranslateService : Service() {
     }
 
     override fun onDestroy() {
+        auto = false
+        main.removeCallbacks(poller)
         hidePanel()
         bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         vDisplay?.release()
