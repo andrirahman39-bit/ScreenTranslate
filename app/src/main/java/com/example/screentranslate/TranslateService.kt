@@ -346,33 +346,4 @@ class TranslateService : Service() {
         projection?.stop()
         super.onDestroy()
     }
-}= LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xF0111827.toInt())
-            addView(ScrollView(context).apply { addView(tv) }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-            addView(close, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        }
-        val lp = WindowManager.LayoutParams(
-            MATCH_PARENT, (h * 0.45).toInt(), overlayType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.BOTTOM }
-        wm.addView(box, lp)
-        panel = box
-    }
-
-    private fun hidePanel() {
-        panel?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        panel = null
-    }
-
-    override fun onDestroy() {
-        auto = false
-        main.removeCallbacks(poller)
-        hidePanel()
-        bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        vDisplay?.release()
-        reader?.close()
-        projection?.stop()
-        super.onDestroy()
-    }
 }
