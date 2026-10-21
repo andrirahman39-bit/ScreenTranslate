@@ -19,6 +19,6 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
-dependencies {
+dependencies {implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
